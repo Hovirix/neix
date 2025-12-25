@@ -2,7 +2,6 @@ use clap::Parser;
 use std::process;
 
 mod db;
-mod index;
 mod query;
 
 #[derive(Parser, Debug)]
@@ -19,7 +18,7 @@ fn main() {
     let args = Args::parse();
 
     if args.update {
-        if let Err(e) = index::update_index() {
+        if let Err(e) = db::update_db() {
             eprintln!("index update failed: {e}");
             process::exit(1);
         }
@@ -43,7 +42,11 @@ fn main() {
         }
     };
 
-    for (name, description) in results {
-        println!("{:<30} {}", name, description.unwrap_or_default());
+    for (name, version, description) in results {
+        match version {
+            Some(v) => print!("{:<30} {:<10}", name, v),
+            None => print!("{:<30} {:<10}", name, ""),
+        }
+        println!(" {}", description.unwrap_or_default());
     }
 }
