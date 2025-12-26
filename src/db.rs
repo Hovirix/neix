@@ -1,20 +1,9 @@
-use rusqlite::{Connection, Result, params};
+use anyhow::{Context, Result};
+use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
-use std::{
-    collections::HashMap,
-    env,
-    io::{self, Write},
-    path::PathBuf,
-    process::Command,
-};
+use std::{collections::HashMap, env, fs, path::PathBuf, process::Command};
 
-#[derive(Debug, Deserialize)]
-struct PkgMeta {
-    pname: String,
-    version: Option<String>,
-    description: Option<String>,
-}
-
+/// Returns the path to the database file, respecting XDG_DATA_HOME if set.
 fn db_path() -> PathBuf {
     if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
         PathBuf::from(xdg_data_home).join("neix").join("neix.db")
@@ -28,15 +17,28 @@ fn db_path() -> PathBuf {
     }
 }
 
+/// Opens a connection to the SQLite database.
+/// Creates the database file and necessary tables if they don't exist.
 pub fn open_db() -> Result<Connection> {
     eprintln!("→ Opening database");
     let path = db_path();
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory for database at {:?}", parent))?;
     }
 
-    let conn = Connection::open(path)?;
+    let conn = Connection::open(&path)
+        .with_context(|| format!("Failed to open database at {:?}", path))?;
+
+    conn.execute_batch(
+        r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA cache_size = -10000; -- 10MB cache
+        "#,
+    )
+    .with_context(|| "Failed to set PRAGMA")?;
 
     conn.execute_batch(
         r#"
@@ -46,88 +48,100 @@ pub fn open_db() -> Result<Connection> {
             version TEXT,
             description TEXT
         );
-
-        CREATE INDEX IF NOT EXISTS idx_packages_name
-        ON packages(name);
         "#,
-    )?;
+    )
+    .with_context(|| "Failed to create table")?;
 
     eprintln!("✓ Database ready");
     Ok(conn)
 }
 
-pub fn upsert_package(
-    conn: &Connection,
-    attr: &str,
-    name: &str,
-    version: &str,
-    description: &str,
-) -> Result<()> {
-    conn.execute(
-        r#"
-        INSERT INTO packages (attr, name, version, description)
-        VALUES (?1, ?2, ?3, ?4)
-        ON CONFLICT(attr) DO UPDATE SET
-            name        = excluded.name,
-            version     = excluded.version,
-            description = excluded.description
-        "#,
-        params![attr, name, version, description],
-    )?;
+/// Updates the database with the latest package information.
+pub fn update_db() -> Result<()> {
+    eprintln!("→ Starting database update");
+
+    let mut conn = open_db().with_context(|| "Failed to open database")?;
+    let tx = conn
+        .transaction()
+        .with_context(|| "Failed to start transaction")?;
+
+    tx.execute("DROP INDEX IF EXISTS idx_packages_name", [])
+        .with_context(|| "Failed to drop index")?;
+
+    eprintln!("→ Fetching and parsing package data");
+    let packages = parse_nix_search().with_context(|| "Failed to parse Nix search output")?;
+    let total = packages.len();
+    eprintln!("→ Indexing {} packages", total);
+
+    insert_packages(&tx, &packages).with_context(|| "Failed to insert packages")?;
+    tx.execute("CREATE INDEX idx_packages_name ON packages(name)", [])
+        .with_context(|| "Failed to create index")?;
+    tx.commit()
+        .with_context(|| "Failed to commit transaction")?;
+
+    eprintln!("✓ Database update complete ({} packages)", total);
     Ok(())
 }
 
 type Index = HashMap<String, PkgMeta>;
 
-pub fn update_db() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("→ Starting database update");
-    io::stderr().flush().ok();
+#[derive(Debug, Deserialize)]
+struct PkgMeta {
+    pname: String,
+    version: Option<String>,
+    description: Option<String>,
+}
 
-    let conn = open_db()?;
-
+/// Runs `nix search` and returns the JSON output as bytes.
+fn run_nix_search() -> Result<Vec<u8>> {
     eprintln!("→ Running `nix search` (this can take a while…)");
-    io::stderr().flush().ok();
 
     let output = Command::new("nix")
         .args(["search", "nixpkgs", ".", "--json"])
-        .output()?;
-
-    eprintln!("✓ nix search finished");
-    io::stderr().flush().ok();
+        .output()
+        .with_context(|| "Failed to run `nix search`")?;
 
     if !output.status.success() {
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        return Err("nix search failed".into());
+        anyhow::bail!("`nix search` failed");
     }
 
-    eprintln!("→ Parsing JSON output");
-    io::stderr().flush().ok();
+    eprintln!("✓ nix search finished");
+    Ok(output.stdout)
+}
 
-    let packages: Index = serde_json::from_slice(&output.stdout)?;
-    let total = packages.len();
+/// Parses the output of `nix search` into a HashMap of package metadata.
+fn parse_nix_search() -> Result<Index> {
+    let output = run_nix_search()?;
+    let packages: Index =
+        serde_json::from_slice(&output).with_context(|| "Failed to parse JSON output")?;
+    Ok(packages)
+}
 
-    eprintln!("→ Indexing {} packages", total);
-    io::stderr().flush().ok();
+/// Inserts or updates packages in the database using a transaction.
+fn insert_packages(tx: &Transaction, packages: &Index) -> Result<()> {
+    let mut stmt = tx
+        .prepare(
+            r#"
+        INSERT INTO packages (attr, name, version, description)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(attr) DO UPDATE SET
+            name = excluded.name,
+            version = excluded.version,
+            description = excluded.description
+        "#,
+        )
+        .with_context(|| "Failed to prepare SQL statement")?;
 
-    let mut count = 0usize;
     for (attr, meta) in packages {
-        upsert_package(
-            &conn,
-            &attr,
-            &meta.pname,
+        stmt.execute(params![
+            attr,
+            meta.pname,
             meta.version.as_deref().unwrap_or(""),
             meta.description.as_deref().unwrap_or(""),
-        )?;
-        count += 1;
-
-        if count.is_multiple_of(5000) {
-            eprintln!("  indexed {}/{}", count, total);
-            io::stderr().flush().ok();
-        }
+        ])
+        .with_context(|| format!("Failed to insert package: {}", attr))?;
     }
-
-    eprintln!("✓ Database update complete ({} packages)", count);
-    io::stderr().flush().ok();
 
     Ok(())
 }
