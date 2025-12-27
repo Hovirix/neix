@@ -38,6 +38,7 @@ fn main() {
             Ok(results) => {
                 if results.is_empty() {
                     println!("{}", "No packages found".yellow());
+                    println!("{}", "Run neix --update to create the database".yellow());
                 } else {
                     println!(
                         "{} {} {}\n",
