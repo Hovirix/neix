@@ -5,11 +5,12 @@ use rusqlite::params;
 #[derive(Debug)]
 pub struct PackageInfo {
     pub attr: String,
+    pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
 }
 
-pub fn query(q: &str) -> Result<Vec<PackageInfo>> {
+pub fn query(q: &str, limit: usize) -> Result<Vec<PackageInfo>> {
     let conn = open_db().with_context(|| "Failed to open database")?;
 
     let exact = q;
@@ -18,7 +19,7 @@ pub fn query(q: &str) -> Result<Vec<PackageInfo>> {
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT p.attr, p.version, p.description
+        SELECT p.attr, p.name, p.version, p.description
         FROM packages p
         JOIN (
             SELECT name, MAX(version) AS version
@@ -34,15 +35,16 @@ pub fn query(q: &str) -> Result<Vec<PackageInfo>> {
                 ELSE 2
             END,
             p.attr
-        LIMIT 10
+        LIMIT ?4
         "#,
     )?;
 
-    let rows = stmt.query_map(params![exact, prefix, substring], |row| {
+    let rows = stmt.query_map(params![exact, prefix, substring, limit as i64], |row| {
         Ok(PackageInfo {
             attr: row.get(0)?,
-            version: row.get(1)?,
-            description: row.get(2)?,
+            name: row.get(1)?,
+            version: row.get(2)?,
+            description: row.get(3)?,
         })
     })?;
 

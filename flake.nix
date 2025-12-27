@@ -1,5 +1,5 @@
 {
-  description = "Fast eix-like search tool for nixpkgs";
+  description = "Blazing fast eix-like search tool for nixpkgs";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

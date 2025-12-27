@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use colored::*;
 use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
 use std::{collections::HashMap, env, fs, path::PathBuf, process::Command};
@@ -20,7 +21,6 @@ fn db_path() -> PathBuf {
 /// Opens a connection to the SQLite database.
 /// Creates the database file and necessary tables if they don't exist.
 pub fn open_db() -> Result<Connection> {
-    eprintln!("→ Opening database");
     let path = db_path();
 
     if let Some(parent) = path.parent() {
@@ -52,13 +52,16 @@ pub fn open_db() -> Result<Connection> {
     )
     .with_context(|| "Failed to create table")?;
 
-    eprintln!("✓ Database ready");
     Ok(conn)
 }
 
 /// Updates the database with the latest package information.
 pub fn update_db() -> Result<()> {
-    eprintln!("→ Starting database update");
+    eprintln!(
+        "{} {}",
+        "→".bright_blue(),
+        "Starting database update".bright_white()
+    );
 
     let mut conn = open_db().with_context(|| "Failed to open database")?;
     let tx = conn
@@ -68,10 +71,19 @@ pub fn update_db() -> Result<()> {
     tx.execute("DROP INDEX IF EXISTS idx_packages_name", [])
         .with_context(|| "Failed to drop index")?;
 
-    eprintln!("→ Fetching and parsing package data");
+    eprintln!(
+        "{} {}",
+        "→".bright_blue(),
+        "Fetching and parsing package data".bright_white()
+    );
     let packages = parse_nix_search().with_context(|| "Failed to parse Nix search output")?;
     let total = packages.len();
-    eprintln!("→ Indexing {} packages", total);
+    eprintln!(
+        "{} {} {}",
+        "→".bright_blue(),
+        "Indexing".bright_white(),
+        format!("{} packages", total).bright_cyan()
+    );
 
     insert_packages(&tx, &packages).with_context(|| "Failed to insert packages")?;
     tx.execute("CREATE INDEX idx_packages_name ON packages(name)", [])
@@ -79,7 +91,12 @@ pub fn update_db() -> Result<()> {
     tx.commit()
         .with_context(|| "Failed to commit transaction")?;
 
-    eprintln!("✓ Database update complete ({} packages)", total);
+    eprintln!(
+        "{} {} {}",
+        "✓".green().bold(),
+        "Database update complete".green(),
+        format!("({} packages)", total).bright_black()
+    );
     Ok(())
 }
 
@@ -94,7 +111,12 @@ struct PkgMeta {
 
 /// Runs `nix search` and returns the JSON output as bytes.
 fn run_nix_search() -> Result<Vec<u8>> {
-    eprintln!("→ Running `nix search` (this can take a while…)");
+    eprintln!(
+        "{} {} {}",
+        "→".bright_blue(),
+        "Running".bright_white(),
+        "`nix search` (this can take a while…)".bright_yellow()
+    );
 
     let output = Command::new("nix")
         .args(["search", "nixpkgs", ".", "--json"])
@@ -106,7 +128,7 @@ fn run_nix_search() -> Result<Vec<u8>> {
         anyhow::bail!("`nix search` failed");
     }
 
-    eprintln!("✓ nix search finished");
+    eprintln!("{} {}", "✓".green().bold(), "nix search finished".green());
     Ok(output.stdout)
 }
 
